@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DBC文件解析器</title>
+    <!-- 引入D3.js库 -->
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .upload-section {
+            text-align: center;
+            padding: 40px;
+            border: 2px dashed #ccc;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .upload-section.drag-over {
+            background-color: #e9ecef;
+            border-color: #007bff;
+        }
+        #fileInput {
+            display: none;
+        }
+        .upload-btn {
+            background-color: #007bff;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        .upload-btn:hover {
+            background-color: #0056b3;
+        }
+        #result {
+            margin-top: 20px;
+            white-space: pre-wrap;
+            font-family: monospace;
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            display: none;
+        }
+        .section {
+            margin-bottom: 20px;
+        }
+        .section-title {
+            font-weight: bold;
+            margin-bottom: 10px;
+            color: #343a40;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 10px;
+        }
+        th, td {
+            border: 1px solid #dee2e6;
+            padding: 8px;
+            text-align: left;
+        }
+        th {
+            background-color: #e9ecef;
+        }
+        tr:nth-child(even) {
+            background-color: #f8f9fa;
+        }
+        /* 拓扑图样式 */
+        #topology {
+            width: 100%;
+            height: 600px;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            margin-top: 20px;
+            background-color: #f8f9fa;
+        }
+        .node {
+            cursor: pointer;
+        }
+        .node circle {
+            stroke: #fff;
+            stroke-width: 2px;
+        }
+        .node text {
+            font-size: 12px;
+            font-family: Arial, sans-serif;
+        }
+        .link {
+            stroke: #999;
+            stroke-opacity: 0.6;
+        }
+        .tooltip {
+            position: absolute;
+            padding: 10px;
+            background: rgba(255, 255, 255, 0.9);
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            pointer-events: none;
+            font-size: 12px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            max-width: 300px;
+            white-space: normal;
+            z-index: 1000;
+        }
+        .zoom-controls {
+            background: rgba(255, 255, 255, 0.9);
+            padding: 5px;
+            border-radius: 4px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .zoom-controls button {
+            margin: 0 2px;
+            padding: 5px 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background: white;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.2s ease;
+        }
+        .zoom-controls button:hover {
+            background: #f0f0f0;
+            border-color: #999;
+        }
+        .tabs {
+            display: flex;
+            margin-bottom: 10px;
+        }
+        .tab {
+            padding: 10px 20px;
+            cursor: pointer;
+            border: 1px solid #dee2e6;
+            border-bottom: none;
+            border-radius: 4px 4px 0 0;
+            margin-right: 5px;
+            background-color: #f8f9fa;
+        }
+        .tab.active {
+            background-color: white;
+            font-weight: bold;
+        }
+        .tab-content {
+            display: none;
+        }
+        .tab-content.active {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>DBC文件解析器</h1>
+        <div class="upload-section" id="dropZone">
+            <input type="file" id="fileInput" accept=".dbc">
+            <button class="upload-btn" onclick="document.getElementById('fileInput').click()">选择DBC文件</button>
+            <p>或将文件拖放到此处</p>
+        </div>
+        
+        <!-- 选项卡导航 -->
+        <div class="tabs" id="tabs">
+            <div class="tab active" data-tab="table-view">表格视图</div>
+            <div class="tab" data-tab="topology-view">拓扑图视图</div>
+        </div>
+        
+        <!-- 表格视图内容 -->
+        <div id="table-view" class="tab-content active">
+            <div id="result"></div>
+        </div>
+        
+        <!-- 拓扑图视图内容 -->
+        <div id="topology-view" class="tab-content">
+            <div class="section-title">消息拓扑图</div>
+            <p>此图显示了ECU节点之间的消息流向关系。节点表示ECU，连线表示消息流向。</p>
+            <div id="topology"></div>
+        </div>
+    </div>
+
+    <script>
+        // 全局变量存储解析结果
+        let globalParseResult = null;
+        
+        class DBCParser {
+            constructor() {
+                this.messages = [];
+                this.signals = {};
+                this.nodes = [];
+                this.version = '';
+            }
+
+            parse(content) {
+                const lines = content.split('\n');
+                let currentMessage = null;
+
+                for (const line of lines) {
+                    const trimmedLine = line.trim();
+                    
+                    if (trimmedLine.startsWith('VERSION')) {
+                        this.version = trimmedLine.split('"')[1] || '';
+                    }
+                    else if (trimmedLine.startsWith('BU_:')) {
+                        this.nodes = trimmedLine.substring(4).trim().split(' ').filter(n => n);
+                    }
+                    else if (trimmedLine.startsWith('BO_')) {
+                        const match = trimmedLine.match(/BO_\s+(\d+)\s+([\w_]+):\s+(\d+)\s+([\w_]+)/);
+                        if (match) {
+                            currentMessage = {
+                                id: parseInt(match[1]),
+                                name: match[2],
+                                length: parseInt(match[3]),
+                                sender: match[4],
+                                signals: []
+                            };
+                            this.messages.push(currentMessage);
+                        }
+                    }
+                    else if (trimmedLine.startsWith('SG_') && currentMessage) {
+                        const match = trimmedLine.match(/SG_\s+([\w_]+)\s*:\s*(\d+)\|(\d+)@(\d+)([+-])\s*\(([-+]?[\d.]+),([-+]?[\d.]+)\)\s*\[([-+]?[\d.]+)\|([-+]?[\d.]+)\]\s*"(.*)"\s*([\w_,]+)/);
+                        if (match) {
+                            const signal = {
+                                name: match[1],
+                                startBit: parseInt(match[2]),
+                                length: parseInt(match[3]),
+                                byteOrder: match[4],
+                                sign: match[5],
+                                factor: parseFloat(match[6]),
+                                offset: parseFloat(match[7]),
+                                minimum: parseFloat(match[8]),
+                                maximum: parseFloat(match[9]),
+                                unit: match[10],
+                                receivers: match[11].split(',').filter(n => n)
+                            };
+                            currentMessage.signals.push(signal);
+                        }
+                    }
+                }
+
+                return {
+                    version: this.version,
+                    nodes: this.nodes,
+                    messages: this.messages
+                };
+            }
+        }
+
+        function formatResults(parseResult) {
+            let html = '<div class="section">';
+            html += `<div class="section-title">版本信息</div>${parseResult.version}</div>`;
+            
+            html += '<div class="section"><div class="section-title">网络节点</div>';
+            html += `<table><tr><th>节点名称</th></tr>${parseResult.nodes.map(node => 
+                `<tr><td>${node}</td></tr>`).join('')}</table></div>`;
+
+            html += '<div class="section"><div class="section-title">消息定义</div>';
+            parseResult.messages.forEach(msg => {
+                html += `<table>
+                    <tr><th colspan="8">消息: ${msg.name} (ID: ${msg.id}, 长度: ${msg.length}字节, 发送者: ${msg.sender})</th></tr>
+                    <tr>
+                        <th>信号名称</th>
+                        <th>起始位</th>
+                        <th>长度</th>
+                        <th>字节顺序</th>
+                        <th>因子</th>
+                        <th>偏移量</th>
+                        <th>单位</th>
+                        <th>接收者</th>
+                    </tr>`;
+                msg.signals.forEach(signal => {
+                    html += `<tr>
+                        <td>${signal.name}</td>
+                        <td>${signal.startBit}</td>
+                        <td>${signal.length}</td>
+                        <td>${signal.byteOrder}</td>
+                        <td>${signal.factor}</td>
+                        <td>${signal.offset}</td>
+                        <td>${signal.unit}</td>
+                        <td>${signal.receivers.join(', ')}</td>
+                    </tr>`;
+                });
+                html += '</table><br>';
+            });
+            html += '</div>';
+
+            return html;
+        }
+
+        // 准备拓扑图数据
+        function prepareTopologyData(parseResult) {
+            // 创建节点数据
+            const nodes = parseResult.nodes.map(nodeName => ({
+                id: nodeName,
+                name: nodeName,
+                group: 1 // 所有ECU节点为同一组
+            }));
+            
+            // 创建连接数据
+            const links = [];
+            parseResult.messages.forEach(msg => {
+                // 对每个消息，从发送者到每个接收者创建一个连接
+                if (msg.signals && msg.signals.length > 0) {
+                    // 收集所有接收者
+                    const allReceivers = new Set();
+                    msg.signals.forEach(signal => {
+                        signal.receivers.forEach(receiver => {
+                            allReceivers.add(receiver);
+                        });
+                    });
+                    
+                    // 为每个接收者创建连接
+                    allReceivers.forEach(receiver => {
+                        if (receiver !== msg.sender) { // 避免自环
+                            links.push({
+                                source: msg.sender,
+                                target: receiver,
+                                value: 1, // 连接强度
+                                message: msg.name,
+                                id: msg.id
+                            });
+                        }
+                    });
+                }
+            });
+            
+            return { nodes, links };
+        }
+
+        // 绘制拓扑图
+        function drawTopology(parseResult) {
+            // 清空现有图形
+            d3.select('#topology').html('');
+            
+            // 准备数据
+            const data = prepareTopologyData(parseResult);
+            
+            // 设置SVG尺寸
+            const width = document.getElementById('topology').clientWidth;
+            const height = 600;
+            
+            // 创建SVG元素，添加缩放和平移功能
+            const svg = d3.select('#topology')
+                .append('svg')
+                .attr('width', width)
+                .attr('height', height)
+                .call(d3.zoom().on('zoom', function(event) {
+                    g.attr('transform', event.transform);
+                }));
+
+            // 添加一个容器组用于缩放
+            const g = svg.append('g');
+            
+            // 创建力导向模拟
+            const simulation = d3.forceSimulation(data.nodes)
+                .force('link', d3.forceLink(data.links).id(d => d.id).distance(150))
+                .force('charge', d3.forceManyBody().strength(-300))
+                .force('center', d3.forceCenter(width / 2, height / 2))
+                .force('collision', d3.forceCollide().radius(60));
+            
+            // 创建箭头标记
+            svg.append('defs').append('marker')
+                .attr('id', 'arrowhead')
+                .attr('viewBox', '-0 -5 10 10')
+                .attr('refX', 35) // 调整箭头位置
+                .attr('refY', 0)
+                .attr('orient', 'auto')
+                .attr('markerWidth', 6)
+                .attr('markerHeight', 6)
+                .attr('xoverflow', 'visible')
+                .append('svg:path')
+                .attr('d', 'M 0,-5 L 10 ,0 L 0,5')
+                .attr('fill', '#999')
+                .style('stroke', 'none');
+
+            // 合并相同源和目标之间的连接
+            const mergedLinks = [];
+            data.links.forEach(link => {
+                const existingLink = mergedLinks.find(l => 
+                    l.source === link.source && l.target === link.target
+                );
+                if (existingLink) {
+                    existingLink.messages.push({ name: link.message, id: link.id });
+                    existingLink.value++;
+                } else {
+                    mergedLinks.push({
+                        source: link.source,
+                        target: link.target,
+                        messages: [{ name: link.message, id: link.id }],
+                        value: 1
+                    });
+                }
+            });
+
+            // 添加连接
+            const link = g.append('g')
+                .selectAll('line')
+                .data(mergedLinks)
+                .enter().append('line')
+                .attr('class', 'link')
+                .attr('marker-end', 'url(#arrowhead)')
+                .attr('stroke-width', d => Math.sqrt(d.value) * 2)
+                .on('mouseover', function(event, d) {
+                    // 创建提示框
+                    const tooltip = d3.select('body').append('div')
+                        .attr('class', 'tooltip')
+                        .style('opacity', 0);
+
+                    // 构建消息列表HTML
+                    const messageList = d.messages.map(msg => 
+                        `${msg.name} (ID: ${msg.id})`
+                    ).join('<br>');
+
+                    // 显示提示框
+                    tooltip.transition()
+                        .duration(200)
+                        .style('opacity', .9);
+                    tooltip.html(`消息数量: ${d.value}<br><br>${messageList}`)
+                        .style('left', (event.pageX + 10) + 'px')
+                        .style('top', (event.pageY - 28) + 'px');
+                })
+                .on('mouseout', function() {
+                    d3.selectAll('.tooltip').remove();
+                });
+            
+            // 添加节点
+            const node = g.append('g')
+                .selectAll('.node')
+                .data(data.nodes)
+                .enter().append('g')
+                .attr('class', 'node')
+                .call(d3.drag()
+                    .on('start', dragstarted)
+                    .on('drag', dragged)
+                    .on('end', dragended));
+            
+            // 添加节点圆形
+            node.append('circle')
+                .attr('r', 30)
+                .attr('fill', d => getNodeColor(d.id));
+            
+            // 添加节点文本
+            node.append('text')
+                .attr('dy', '.35em')
+                .attr('text-anchor', 'middle')
+                .text(d => d.name);
+            
+            // 更新模拟
+            simulation.on('tick', () => {
+                // 更新连接位置
+                link
+                    .attr('x1', d => d.source.x)
+                    .attr('y1', d => d.source.y)
+                    .attr('x2', d => d.target.x)
+                    .attr('y2', d => d.target.y);
+                
+                // 更新节点位置
+                node
+                    .attr('transform', d => `translate(${d.x},${d.y})`);
+            });
+            
+            // 添加缩放范围限制
+            const zoom = d3.zoom()
+                .scaleExtent([0.1, 4]) // 限制缩放范围：最小0.1倍，最大4倍
+                .on('zoom', function(event) {
+                    g.attr('transform', event.transform);
+                });
+            
+            // 应用缩放行为
+            svg.call(zoom);
+            
+            // 添加缩放控制按钮
+            const zoomControls = d3.select('#topology')
+                .append('div')
+                .attr('class', 'zoom-controls')
+                .style('position', 'absolute')
+                .style('top', '10px')
+                .style('right', '10px');
+            
+            zoomControls.append('button')
+                .text('+')
+                .on('click', () => {
+                    svg.transition().duration(300).call(zoom.scaleBy, 1.2);
+                });
+            
+            zoomControls.append('button')
+                .text('-')
+                .on('click', () => {
+                    svg.transition().duration(300).call(zoom.scaleBy, 0.8);
+                });
+            
+            zoomControls.append('button')
+                .text('重置')
+                .on('click', () => {
+                    svg.transition().duration(300).call(
+                        zoom.transform,
+                        d3.zoomIdentity.translate(width/2, height/2).scale(0.8)
+                    );
+                });
+            
+            // 拖拽函数
+            function dragstarted(event, d) {
+                if (!event.active) simulation.alphaTarget(0.3).restart();
+                d.fx = d.x;
+                d.fy = d.y;
+            }
+            
+            function dragged(event, d) {
+                d.fx = event.x;
+                d.fy = event.y;
+            }
+            
+            function dragended(event, d) {
+                if (!event.active) simulation.alphaTarget(0);
+                d.fx = null;
+                d.fy = null;
+            }
+            
+            // 根据节点ID生成颜色
+            function getNodeColor(id) {
+                // 使用简单的哈希函数生成颜色
+                let hash = 0;
+                for (let i = 0; i < id.length; i++) {
+                    hash = id.charCodeAt(i) + ((hash << 5) - hash);
+                }
+                
+                // 转换为HSL颜色，保持饱和度和亮度固定，只变化色相
+                const hue = Math.abs(hash % 360);
+                return `hsl(${hue}, 70%, 60%)`;
+            }
+        }
+
+        // 文件处理函数
+        function handleFile(file) {
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const parser = new DBCParser();
+                const parseResult = parser.parse(e.target.result);
+                
+                // 保存全局解析结果
+                globalParseResult = parseResult;
+                
+                // 更新表格视图
+                const resultDiv = document.getElementById('result');
+                resultDiv.innerHTML = formatResults(parseResult);
+                resultDiv.style.display = 'block';
+                
+                // 绘制拓扑图
+                drawTopology(parseResult);
+                
+                // 显示选项卡
+                document.getElementById('tabs').style.display = 'flex';
+            };
+            reader.readAsText(file);
+        }
+
+        // 选项卡切换功能
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', function() {
+                // 移除所有选项卡的活动状态
+                document.querySelectorAll('.tab').forEach(t => {
+                    t.classList.remove('active');
+                });
+                
+                // 隐藏所有内容
+                document.querySelectorAll('.tab-content').forEach(content => {
+                    content.classList.remove('active');
+                });
+                
+                // 激活当前选项卡
+                this.classList.add('active');
+                
+                // 显示对应内容
+                const tabId = this.getAttribute('data-tab');
+                document.getElementById(tabId).classList.add('active');
+            });
+        });
+
+        // 文件输入事件处理
+        document.getElementById('fileInput').addEventListener('change', function(e) {
+            if (e.target.files.length > 0) {
+                handleFile(e.target.files[0]);
+            }
+        });
+
+        // 拖放区域事件处理
+        const dropZone = document.getElementById('dropZone');
+
+        dropZone.addEventListener('dragover', function(e) {
+            e.preventDefault();
+            this.classList.add('drag-over');
+        });
+
+        dropZone.addEventListener('dragleave', function(e) {
+            e.preventDefault();
+            this.classList.remove('drag-over');
+        });
+
+        dropZone.addEventListener('drop', function(e) {
+            e.preventDefault();
+            this.classList.remove('drag-over');
+            if (e.dataTransfer.files.length > 0) {
+                handleFile(e.dataTransfer.files[0]);
+            }
+        });
+        
+        // 初始隐藏选项卡
+        document.getElementById('tabs').style.display = 'none';
+    </script>
+</body>
+</html>
