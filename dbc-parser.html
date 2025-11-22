@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DBC文件解析器</title>
     <!-- 引入D3.js库 -->
-    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="d3.v7.min.js"></script>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -159,6 +159,16 @@
         .tab-content.active {
             display: block;
         }
+        #topology {
+            width: 100%;
+            height: 600px;
+            min-height: 600px;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            background-color: #f8f9fa;
+            position: relative;
+            overflow: hidden;
+        }
     </style>
 </head>
 <body>
@@ -169,6 +179,7 @@
             <button class="upload-btn" onclick="document.getElementById('fileInput').click()">选择DBC文件</button>
             <p>或将文件拖放到此处</p>
         </div>
+
         
         <!-- 选项卡导航 -->
         <div class="tabs" id="tabs">
@@ -334,39 +345,103 @@
                 }
             });
             
-            return { nodes, links };
+            console.log('拓扑图数据:', { nodes, links, nodeCount: nodes.length, linkCount: links.length });
+            console.log('原始解析结果:', parseResult);
+            
+            // 检查是否存在Vector__XXX节点，如果有则过滤掉
+            const filteredNodes = nodes.filter(node => node.id !== 'Vector__XXX');
+            const filteredLinks = links.filter(link => 
+                link.source !== 'Vector__XXX' && link.target !== 'Vector__XXX'
+            );
+            
+            if (filteredNodes.length < nodes.length) {
+                console.log('过滤了Vector__XXX节点');
+            }
+            
+            return { nodes: filteredNodes, links: filteredLinks };
         }
 
         // 绘制拓扑图
         function drawTopology(parseResult) {
+            console.log('开始绘制拓扑图...');
+            
+            // 数据有效性检查
+            if (!parseResult || !parseResult.nodes || !parseResult.messages) {
+                console.error('数据格式错误:', parseResult);
+                d3.select('#topology').html('<div style="text-align: center; padding: 50px; color: red;">拓扑图数据格式错误，无法绘制</div>');
+                return;
+            }
+            
+            console.log('拓扑图数据有效:', {
+                nodeCount: parseResult.nodes.length,
+                messageCount: parseResult.messages.length
+            });
+            
             // 清空现有图形
             d3.select('#topology').html('');
+            
+            // 检查容器是否存在
+            const topologyContainer = document.getElementById('topology');
+            if (!topologyContainer) {
+                console.error('拓扑图容器不存在');
+                return;
+            }
+            
+            // 确保容器有明确的尺寸
+            if (topologyContainer.clientWidth === 0) {
+                topologyContainer.style.width = '100%';
+                topologyContainer.style.height = '600px';
+                console.log('设置拓扑图容器默认尺寸');
+            }
             
             // 准备数据
             const data = prepareTopologyData(parseResult);
             
+            // 检查数据有效性
+            if (!data.nodes || data.nodes.length === 0) {
+                d3.select('#topology').html('<div style="text-align: center; padding: 50px; color: #666;">没有可用的节点数据</div>');
+                return;
+            }
+            
+            // 如果没有连接数据，显示提示信息但仍然显示节点
+            if (!data.links || data.links.length === 0) {
+                console.log('没有连接数据，只显示节点');
+                // 继续执行，但会在没有连接的情况下显示节点
+            }
+            
+            // 获取拓扑图容器元素
+            const topologyDiv = d3.select('#topology');
+            if (topologyDiv.empty()) {
+                console.error('拓扑图容器元素未找到');
+                return;
+            }
+            
+            console.log('拓扑图容器找到，开始绘制...');
+            
             // 设置SVG尺寸
-            const width = document.getElementById('topology').clientWidth;
+            const width = Math.max(document.getElementById('topology').clientWidth, 800);
             const height = 600;
             
-            // 创建SVG元素，添加缩放和平移功能
-            const svg = d3.select('#topology')
+            // 清空之前的内容并创建SVG元素
+            topologyDiv.selectAll('*').remove();
+            const svg = topologyDiv
                 .append('svg')
                 .attr('width', width)
-                .attr('height', height)
-                .call(d3.zoom().on('zoom', function(event) {
-                    g.attr('transform', event.transform);
-                }));
+                .attr('height', height);
 
             // 添加一个容器组用于缩放
             const g = svg.append('g');
             
             // 创建力导向模拟
             const simulation = d3.forceSimulation(data.nodes)
-                .force('link', d3.forceLink(data.links).id(d => d.id).distance(150))
                 .force('charge', d3.forceManyBody().strength(-300))
                 .force('center', d3.forceCenter(width / 2, height / 2))
                 .force('collision', d3.forceCollide().radius(60));
+            
+            // 如果有连接数据，添加连接力
+            if (data.links && data.links.length > 0) {
+                simulation.force('link', d3.forceLink(data.links).id(d => d.id).distance(150));
+            }
             
             // 创建箭头标记
             svg.append('defs').append('marker')
@@ -385,53 +460,60 @@
 
             // 合并相同源和目标之间的连接
             const mergedLinks = [];
-            data.links.forEach(link => {
-                const existingLink = mergedLinks.find(l => 
-                    l.source === link.source && l.target === link.target
-                );
-                if (existingLink) {
-                    existingLink.messages.push({ name: link.message, id: link.id });
-                    existingLink.value++;
-                } else {
-                    mergedLinks.push({
-                        source: link.source,
-                        target: link.target,
-                        messages: [{ name: link.message, id: link.id }],
-                        value: 1
-                    });
-                }
-            });
-
-            // 添加连接
-            const link = g.append('g')
-                .selectAll('line')
-                .data(mergedLinks)
-                .enter().append('line')
-                .attr('class', 'link')
-                .attr('marker-end', 'url(#arrowhead)')
-                .attr('stroke-width', d => Math.sqrt(d.value) * 2)
-                .on('mouseover', function(event, d) {
-                    // 创建提示框
-                    const tooltip = d3.select('body').append('div')
-                        .attr('class', 'tooltip')
-                        .style('opacity', 0);
-
-                    // 构建消息列表HTML
-                    const messageList = d.messages.map(msg => 
-                        `${msg.name} (ID: ${msg.id})`
-                    ).join('<br>');
-
-                    // 显示提示框
-                    tooltip.transition()
-                        .duration(200)
-                        .style('opacity', .9);
-                    tooltip.html(`消息数量: ${d.value}<br><br>${messageList}`)
-                        .style('left', (event.pageX + 10) + 'px')
-                        .style('top', (event.pageY - 28) + 'px');
-                })
-                .on('mouseout', function() {
-                    d3.selectAll('.tooltip').remove();
+            if (data.links && data.links.length > 0) {
+                data.links.forEach(link => {
+                    const existingLink = mergedLinks.find(l => 
+                        l.source === link.source && l.target === link.target
+                    );
+                    if (existingLink) {
+                        existingLink.messages.push({ name: link.message, id: link.id });
+                        existingLink.value++;
+                    } else {
+                        mergedLinks.push({
+                            source: link.source,
+                            target: link.target,
+                            messages: [{ name: link.message, id: link.id }],
+                            value: 1
+                        });
+                    }
                 });
+            }
+
+            // 添加连接（如果有的话）
+            let link = g.append('g').selectAll('.link').data([]);
+            if (mergedLinks.length > 0) {
+                link = g.append('g')
+                    .selectAll('line')
+                    .data(mergedLinks)
+                    .enter().append('line')
+                    .attr('class', 'link')
+                    .attr('marker-end', 'url(#arrowhead)')
+                    .attr('stroke-width', d => Math.sqrt(d.value) * 2)
+                    .on('mouseover', function(event, d) {
+                        // 创建提示框
+                        const tooltip = d3.select('body').append('div')
+                            .attr('class', 'tooltip')
+                            .style('opacity', 0);
+
+                        // 构建消息列表HTML
+                        const messageList = d.messages.map(msg => 
+                            `${msg.name} (ID: ${msg.id})`
+                        ).join('<br>');
+
+                        // 显示提示框
+                        tooltip.transition()
+                            .duration(200)
+                            .style('opacity', .9);
+                        tooltip.html(`消息数量: ${d.value}<br><br>${messageList}`)
+                            .style('left', (event.pageX + 10) + 'px')
+                            .style('top', (event.pageY - 28) + 'px');
+                    })
+                    .on('mouseout', function() {
+                        d3.selectAll('.tooltip').remove();
+                    });
+            }
+            
+            console.log('绘制连接线，合并后的连接数:', mergedLinks.length);
             
             // 添加节点
             const node = g.append('g')
@@ -444,6 +526,8 @@
                     .on('drag', dragged)
                     .on('end', dragended));
             
+            console.log('绘制节点，节点数:', data.nodes.length);
+            
             // 添加节点圆形
             node.append('circle')
                 .attr('r', 30)
@@ -455,29 +539,35 @@
                 .attr('text-anchor', 'middle')
                 .text(d => d.name);
             
+            console.log('开始模拟更新...');
+            
             // 更新模拟
             simulation.on('tick', () => {
-                // 更新连接位置
-                link
-                    .attr('x1', d => d.source.x)
-                    .attr('y1', d => d.source.y)
-                    .attr('x2', d => d.target.x)
-                    .attr('y2', d => d.target.y);
+                // 更新连接位置（如果有连接的话）
+                if (mergedLinks.length > 0 && link.size() > 0) {
+                    link
+                        .attr('x1', d => d.source.x)
+                        .attr('y1', d => d.source.y)
+                        .attr('x2', d => d.target.x)
+                        .attr('y2', d => d.target.y);
+                }
                 
                 // 更新节点位置
                 node
                     .attr('transform', d => `translate(${d.x},${d.y})`);
             });
             
-            // 添加缩放范围限制
-            const zoom = d3.zoom()
+            // 启动模拟
+            simulation.restart();
+            
+            console.log('拓扑图绘制完成');
+            
+            // 应用缩放行为
+            svg.call(d3.zoom()
                 .scaleExtent([0.1, 4]) // 限制缩放范围：最小0.1倍，最大4倍
                 .on('zoom', function(event) {
                     g.attr('transform', event.transform);
-                });
-            
-            // 应用缩放行为
-            svg.call(zoom);
+                }));
             
             // 添加缩放控制按钮
             const zoomControls = d3.select('#topology')
@@ -490,20 +580,20 @@
             zoomControls.append('button')
                 .text('+')
                 .on('click', () => {
-                    svg.transition().duration(300).call(zoom.scaleBy, 1.2);
+                    svg.transition().duration(300).call(d3.zoom().scaleBy, 1.2);
                 });
             
             zoomControls.append('button')
                 .text('-')
                 .on('click', () => {
-                    svg.transition().duration(300).call(zoom.scaleBy, 0.8);
+                    svg.transition().duration(300).call(d3.zoom().scaleBy, 0.8);
                 });
             
             zoomControls.append('button')
                 .text('重置')
                 .on('click', () => {
                     svg.transition().duration(300).call(
-                        zoom.transform,
+                        d3.zoom().transform,
                         d3.zoomIdentity.translate(width/2, height/2).scale(0.8)
                     );
                 });
@@ -556,7 +646,12 @@
                 resultDiv.style.display = 'block';
                 
                 // 绘制拓扑图
-                drawTopology(parseResult);
+                console.log('开始绘制拓扑图...');
+                
+                // 延迟绘制拓扑图，确保DOM完全加载
+                setTimeout(() => {
+                    drawTopology(parseResult);
+                }, 100);
                 
                 // 显示选项卡
                 document.getElementById('tabs').style.display = 'flex';
@@ -583,6 +678,13 @@
                 // 显示对应内容
                 const tabId = this.getAttribute('data-tab');
                 document.getElementById(tabId).classList.add('active');
+                
+                // 如果切换到拓扑图视图且有解析结果，重新绘制拓扑图
+                if (tabId === 'topology-view' && globalParseResult) {
+                    setTimeout(() => {
+                        drawTopology(globalParseResult);
+                    }, 100);
+                }
             });
         });
 
