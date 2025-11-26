@@ -218,15 +218,29 @@
 
                 for (const line of lines) {
                     const trimmedLine = line.trim();
-                    
+
+                    // 跳过空行和注释
+                    if (!trimmedLine || trimmedLine.startsWith('//') || trimmedLine.startsWith('/*')) {
+                        continue;
+                    }
+
                     if (trimmedLine.startsWith('VERSION')) {
-                        this.version = trimmedLine.split('"')[1] || '';
+                        const versionMatch = trimmedLine.match(/VERSION\s+"([^"]*)"/);
+                        if (versionMatch) {
+                            this.version = versionMatch[1];
+                        }
                     }
-                    else if (trimmedLine.startsWith('BU_:')) {
-                        this.nodes = trimmedLine.substring(4).trim().split(' ').filter(n => n);
+                    else if (trimmedLine.startsWith('BU_')) {
+                        // 更好地处理节点解析，过滤空字符串和制表符
+                        const nodePart = trimmedLine.substring(3).replace(':', '').trim();
+                        this.nodes = nodePart.split(/\s+/).filter(n => n && n.length > 0);
+                        console.log('解析到的节点:', this.nodes);
+                        console.log('BU_行原始内容:', trimmedLine);
+                        console.log('提取的节点部分:', nodePart);
                     }
-                    else if (trimmedLine.startsWith('BO_')) {
-                        const match = trimmedLine.match(/BO_\s+(\d+)\s+([\w_]+):\s+(\d+)\s+([\w_]+)/);
+                    else if (trimmedLine.match(/^\s*BO_\s+/)) {
+                        // 增强BO_正则表达式，支持前导空格和更灵活的格式
+                        const match = trimmedLine.match(/^\s*BO_\s+(\d+)\s+([^\s:]+)\s*:\s*(\d+)\s+([^\s]+)/);
                         if (match) {
                             currentMessage = {
                                 id: parseInt(match[1]),
@@ -236,10 +250,14 @@
                                 signals: []
                             };
                             this.messages.push(currentMessage);
+                            console.log('解析到消息:', currentMessage);
+                        } else {
+                            console.log('BO_行匹配失败:', trimmedLine);
                         }
                     }
-                    else if (trimmedLine.startsWith('SG_') && currentMessage) {
-                        const match = trimmedLine.match(/SG_\s+([\w_]+)\s*:\s*(\d+)\|(\d+)@(\d+)([+-])\s*\(([-+]?[\d.]+),([-+]?[\d.]+)\)\s*\[([-+]?[\d.]+)\|([-+]?[\d.]+)\]\s*"(.*)"\s*([\w_,]+)/);
+                    else if (trimmedLine.match(/^\s*SG_\s+/) && currentMessage) {
+                        // 更灵活的SG_正则表达式，支持复杂的信号名和接收者
+                        const match = trimmedLine.match(/SG_\s+([^\s:]+)\s*:\s*(\d+)\|(\d+)@(\d+)([+-])\s*\(([-+]?[\d.]+),([-+]?[\d.]+)\)\s*\[([-+]?[\d.]+)\|([-+]?[\d.]+)\]\s*"([^"]*)"\s*([^\s,]+(?:,[^\s,]+)*)/);
                         if (match) {
                             const signal = {
                                 name: match[1],
@@ -252,18 +270,65 @@
                                 minimum: parseFloat(match[8]),
                                 maximum: parseFloat(match[9]),
                                 unit: match[10],
-                                receivers: match[11].split(',').filter(n => n)
+                                receivers: match[11].split(',').filter(n => n && n.length > 0)
                             };
                             currentMessage.signals.push(signal);
+                            console.log('解析到信号:', signal);
+                        } else {
+                            // 尝试另一种简化的匹配模式
+                            const simpleMatch = trimmedLine.match(/SG_\s+([^\s:]+)\s*:\s*(\d+)\|(\d+)@(\d+)([+-])/);
+                            if (simpleMatch) {
+                                const signal = {
+                                    name: simpleMatch[1],
+                                    startBit: parseInt(simpleMatch[2]),
+                                    length: parseInt(simpleMatch[3]),
+                                    byteOrder: simpleMatch[4],
+                                    sign: simpleMatch[5],
+                                    factor: 1,
+                                    offset: 0,
+                                    minimum: 0,
+                                    maximum: 1,
+                                    unit: '',
+                                    receivers: []
+                                };
+                                currentMessage.signals.push(signal);
+                                console.log('解析到简化信号:', signal);
+                            }
                         }
                     }
                 }
 
-                return {
+                // 如果没有找到信号，为每个消息创建默认信号
+                this.messages.forEach(msg => {
+                    if (msg.signals.length === 0) {
+                        // 创建一个默认信号，接收者为所有节点（除了发送者）
+                        const receivers = this.nodes.filter(node => node !== msg.sender);
+                        if (receivers.length > 0) {
+                            msg.signals.push({
+                                name: `${msg.name}_Data`,
+                                startBit: 0,
+                                length: msg.length * 8,
+                                byteOrder: '0',
+                                sign: '+',
+                                factor: 1,
+                                offset: 0,
+                                minimum: 0,
+                                maximum: 1,
+                                unit: '',
+                                receivers: receivers
+                            });
+                        }
+                    }
+                });
+
+                const result = {
                     version: this.version,
                     nodes: this.nodes,
                     messages: this.messages
                 };
+
+                console.log('解析完成:', result);
+                return result;
             }
         }
 
@@ -316,7 +381,7 @@
                 name: nodeName,
                 group: 1 // 所有ECU节点为同一组
             }));
-            
+
             // 创建连接数据
             const links = [];
             parseResult.messages.forEach(msg => {
@@ -325,11 +390,22 @@
                     // 收集所有接收者
                     const allReceivers = new Set();
                     msg.signals.forEach(signal => {
-                        signal.receivers.forEach(receiver => {
-                            allReceivers.add(receiver);
-                        });
+                        if (signal.receivers && signal.receivers.length > 0) {
+                            signal.receivers.forEach(receiver => {
+                                allReceivers.add(receiver);
+                            });
+                        }
                     });
-                    
+
+                    // 如果没有找到接收者，假设广播到所有其他节点
+                    if (allReceivers.size === 0) {
+                        parseResult.nodes.forEach(node => {
+                            if (node !== msg.sender) {
+                                allReceivers.add(node);
+                            }
+                        });
+                    }
+
                     // 为每个接收者创建连接
                     allReceivers.forEach(receiver => {
                         if (receiver !== msg.sender) { // 避免自环
@@ -342,22 +418,35 @@
                             });
                         }
                     });
+                } else {
+                    // 如果没有信号定义，假设消息广播到所有其他节点
+                    parseResult.nodes.forEach(node => {
+                        if (node !== msg.sender) {
+                            links.push({
+                                source: msg.sender,
+                                target: node,
+                                value: 1, // 连接强度
+                                message: msg.name,
+                                id: msg.id
+                            });
+                        }
+                    });
                 }
             });
-            
+
             console.log('拓扑图数据:', { nodes, links, nodeCount: nodes.length, linkCount: links.length });
             console.log('原始解析结果:', parseResult);
-            
+
             // 检查是否存在Vector__XXX节点，如果有则过滤掉
             const filteredNodes = nodes.filter(node => node.id !== 'Vector__XXX');
-            const filteredLinks = links.filter(link => 
+            const filteredLinks = links.filter(link =>
                 link.source !== 'Vector__XXX' && link.target !== 'Vector__XXX'
             );
-            
+
             if (filteredNodes.length < nodes.length) {
                 console.log('过滤了Vector__XXX节点');
             }
-            
+
             return { nodes: filteredNodes, links: filteredLinks };
         }
 
